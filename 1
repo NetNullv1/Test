@@ -1,108 +1,850 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
-title IPv4 Network Audit - Win10 SAFE
+setlocal EnableExtensions
+title NetNull IPv4 Deep Audit - Win10 - No Admin
 color 0A
 
-rem ASCII-only BAT for maximum Windows 10 cmd.exe compatibility.
-rem No admin, no UAC, no PowerShell script generation tricks.
+set "NN_OUT=%USERPROFILE%\Desktop\IPv4_Deep_Audit_%COMPUTERNAME%_%RANDOM%"
+if not exist "%USERPROFILE%\Desktop" set "NN_OUT=%TEMP%\IPv4_Deep_Audit_%COMPUTERNAME%_%RANDOM%"
+mkdir "%NN_OUT%" >nul 2>&1
 
-set "BASE=%USERPROFILE%\Desktop"
-if not exist "%BASE%" set "BASE=%TEMP%"
-set "OUT=%BASE%\IPv4_Audit_%COMPUTERNAME%"
-if not exist "%OUT%" mkdir "%OUT%" 2>nul
+echo NetNull IPv4 Deep Audit started> "%NN_OUT%\00_BOOT.txt"
+echo Computer: %COMPUTERNAME%>> "%NN_OUT%\00_BOOT.txt"
+echo User: %USERNAME%>> "%NN_OUT%\00_BOOT.txt"
+echo Date: %DATE% %TIME%>> "%NN_OUT%\00_BOOT.txt"
 
-echo ============================================================
-echo IPv4 NETWORK AUDIT - WIN10 SAFE - NO ADMIN
-echo ============================================================
-echo Output: %OUT%
-echo.
-
-rem Prove write access before doing anything else.
-echo Audit started %DATE% %TIME%> "%OUT%\00_STARTED.txt"
-if not exist "%OUT%\00_STARTED.txt" (
-  echo ERROR: Cannot write to "%OUT%"
-  echo Trying TEMP...
-  set "OUT=%TEMP%\IPv4_Audit_%COMPUTERNAME%"
-  if not exist "!OUT!" mkdir "!OUT!" 2>nul
-  echo Audit started %DATE% %TIME%> "!OUT!\00_STARTED.txt"
-)
-if not exist "%OUT%\00_STARTED.txt" if exist "!OUT!\00_STARTED.txt" set "OUT=!OUT!"
-
-echo [1/8] Basic Windows network information...
-ipconfig /all > "%OUT%\01_ipconfig_all.txt" 2>&1
-route print -4 > "%OUT%\02_routes_ipv4.txt" 2>&1
-arp -a > "%OUT%\03_arp_before.txt" 2>&1
-netstat -ano > "%OUT%\04_netstat_ano.txt" 2>&1
-getmac /v /fo csv > "%OUT%\05_getmac.csv" 2>&1
-
-echo [2/8] Detecting IPv4 and gateway...
-powershell.exe -NoLogo -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_NetworkAdapterConfiguration | ? IPEnabled | %% { $a=$_; @($_.IPAddress) | ? {$_ -match '^\d+\.\d+\.\d+\.\d+$'} | %% { [pscustomobject]@{Adapter=$a.Description;IPv4=$_;Mask=@($a.IPSubnet)[0];Gateway=@($a.DefaultIPGateway)[0];DNS=($a.DNSServerSearchOrder -join ',');MAC=$a.MACAddress;DHCP=$a.DHCPEnabled} } } | Export-Csv -NoTypeInformation -Encoding UTF8 '%OUT%\06_interfaces.csv'" > "%OUT%\06_interfaces_console.txt" 2>&1
-
-echo [3/8] Detecting public IPv4...
-powershell.exe -NoLogo -NoProfile -Command "$ProgressPreference='SilentlyContinue';try{(Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 'https://api.ipify.org').Content.Trim()}catch{'UNAVAILABLE'}" > "%OUT%\07_public_ipv4.txt" 2>&1
-
-echo [4/8] Detecting private LAN IPv4...
-set "LANIP="
-for /f "usebackq delims=" %%I in (`powershell.exe -NoLogo -NoProfile -Command "$x=Get-CimInstance Win32_NetworkAdapterConfiguration|? IPEnabled|%% {$_.IPAddress}|? {$_ -match '^10\.' -or $_ -match '^192\.168\.' -or $_ -match '^172\.(1[6-9]|2[0-9]|3[01])\.'}|select -First 1; if($x){$x}" 2^>nul`) do set "LANIP=%%I"
-
-echo LAN IPv4: %LANIP%> "%OUT%\08_lan.txt"
-
-if not defined LANIP (
-  echo No private RFC1918 IPv4 found. LAN sweep skipped.>> "%OUT%\08_lan.txt"
-  goto AFTERSWEEP
-)
-
-for /f "tokens=1-4 delims=." %%a in ("%LANIP%") do set "NET=%%a.%%b.%%c"
-
-echo [5/8] Pinging %NET%.1 - %NET%.254...
-echo IP,STATUS> "%OUT%\09_ping_sweep.csv"
-for /L %%H in (1,1,254) do (
-  ping -n 1 -w 120 %NET%.%%H | find "TTL=" >nul
-  if not errorlevel 1 (
-    echo %NET%.%%H,UP>> "%OUT%\09_ping_sweep.csv"
-    echo   UP  %NET%.%%H
-  )
-)
-
-arp -a > "%OUT%\10_arp_after.txt" 2>&1
-
-echo [6/8] Resolving names...
-powershell.exe -NoLogo -NoProfile -Command "$f='%OUT%\09_ping_sweep.csv';if(Test-Path $f){Import-Csv $f|%%{$ip=$_.IP;$n='';try{$n=[Net.Dns]::GetHostEntry($ip).HostName}catch{};[pscustomobject]@{IP=$ip;Hostname=$n;Status=$_.STATUS}}|Export-Csv -NoTypeInformation -Encoding UTF8 '%OUT%\11_hosts.csv'}" > "%OUT%\11_hosts_console.txt" 2>&1
-
-echo [7/8] Scanning common TCP ports...
-powershell.exe -NoLogo -NoProfile -Command "$ErrorActionPreference='SilentlyContinue';$ports=21,22,23,25,53,80,110,135,139,143,443,445,554,587,631,993,995,1433,1883,3000,3306,3389,5000,5432,5555,5900,5985,5986,6379,8000,8080,8081,8443,8888,9000,9090,9100,9200,10000,25565,27017;$hf='%OUT%\09_ping_sweep.csv';$o=@();if(Test-Path $hf){$hs=Import-Csv $hf;foreach($h in $hs){foreach($p in $ports){$c=New-Object Net.Sockets.TcpClient;try{$a=$c.BeginConnect($h.IP,[int]$p,$null,$null);if($a.AsyncWaitHandle.WaitOne(120,$false)-and$c.Connected){$o+=[pscustomobject]@{IP=$h.IP;Port=$p;State='OPEN'}}catch{}finally{$c.Close()}}}};$o|Export-Csv -NoTypeInformation -Encoding UTF8 '%OUT%\12_open_ports.csv';'Open ports: '+$o.Count" > "%OUT%\12_ports_console.txt" 2>&1
-
-:AFTERSWEEP
-echo [8/8] Local listeners and connections...
-powershell.exe -NoLogo -NoProfile -Command "try{Get-NetTCPConnection -State Listen|select LocalAddress,LocalPort,OwningProcess|sort LocalPort|Export-Csv -NoTypeInformation -Encoding UTF8 '%OUT%\13_local_listeners.csv'}catch{$_|Out-File '%OUT%\13_local_listeners_ERROR.txt'}" >nul 2>&1
-powershell.exe -NoLogo -NoProfile -Command "try{Get-NetTCPConnection|? State -eq Established|select LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess|Export-Csv -NoTypeInformation -Encoding UTF8 '%OUT%\14_connections.csv'}catch{$_|Out-File '%OUT%\14_connections_ERROR.txt'}" >nul 2>&1
-
-(
-echo IPv4 NETWORK AUDIT
-echo ==================
-echo Computer: %COMPUTERNAME%
-echo User: %USERNAME%
-echo Date: %DATE% %TIME%
-echo LAN IPv4: %LANIP%
-echo.
-echo Public IPv4:
-type "%OUT%\07_public_ipv4.txt"
+echo ================================================================
+echo   NETNULL IPv4 DEEP AUDIT - WINDOWS 10 - NO ADMIN
+echo ================================================================
 echo.
 echo Output:
-echo %OUT%
-) > "%OUT%\00_SUMMARY.txt"
+echo %NN_OUT%
+echo.
+echo [BOOT] Saving raw Windows network state first...
+ipconfig /all > "%NN_OUT%\raw_ipconfig_all.txt" 2>&1
+route print -4 > "%NN_OUT%\raw_route_ipv4.txt" 2>&1
+arp -a > "%NN_OUT%\raw_arp_before.txt" 2>&1
+netstat -ano > "%NN_OUT%\raw_netstat_ano.txt" 2>&1
+getmac /v /fo csv > "%NN_OUT%\raw_getmac.csv" 2>&1
+netsh interface portproxy show all > "%NN_OUT%\raw_portproxy.txt" 2>&1
+netsh winhttp show proxy > "%NN_OUT%\raw_winhttp_proxy.txt" 2>&1
+netsh wlan show interfaces > "%NN_OUT%\raw_wlan_interfaces.txt" 2>&1
+netsh wlan show networks mode=bssid > "%NN_OUT%\raw_wlan_nearby.txt" 2>&1
+net share > "%NN_OUT%\raw_net_share.txt" 2>&1
+ipconfig /displaydns > "%NN_OUT%\raw_dns_cache.txt" 2>&1
+netsh advfirewall show allprofiles > "%NN_OUT%\raw_firewall_profiles.txt" 2>&1
 
-echo Audit completed %DATE% %TIME%> "%OUT%\99_FINISHED.txt"
+set "NN_SELF=%~f0"
+set "NN_PS=%TEMP%\nn_deep_audit_%RANDOM%_%RANDOM%.ps1"
+
+echo [BOOT] Extracting embedded PowerShell engine...
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$r=[IO.File]::ReadAllText($env:NN_SELF);$m='#__NNPS_BEGIN__';$i=$r.LastIndexOf($m);if($i -lt 0){exit 91};$c=$r.Substring($i+$m.Length);[IO.File]::WriteAllText($env:NN_PS,$c,(New-Object Text.UTF8Encoding($false)))"
+if errorlevel 1 (
+  echo.
+  echo [FATAL] Could not extract PowerShell engine.
+  echo Raw reports are still in:
+  echo %NN_OUT%
+  echo.
+  start "" explorer.exe "%NN_OUT%"
+  pause
+  exit /b 1
+)
+
+echo [RUN] Starting deep audit...
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%NN_PS%"
+set "NN_RC=%ERRORLEVEL%"
+del "%NN_PS%" >nul 2>&1
 
 echo.
-echo ============================================================
-echo DONE
-echo ============================================================
-echo Results:
-echo %OUT%
+echo ================================================================
+if "%NN_RC%"=="0" (
+  echo   AUDIT FINISHED
+) else (
+  color 0C
+  echo   AUDIT STOPPED WITH ERROR CODE %NN_RC%
+  echo   Check ERROR.txt and console.log in the report folder.
+)
+echo ================================================================
+echo %NN_OUT%
 echo.
-dir /b "%OUT%"
-echo.
-start "" explorer.exe "%OUT%"
+if exist "%NN_OUT%\REPORT.html" start "" "%NN_OUT%\REPORT.html"
+start "" explorer.exe "%NN_OUT%"
 pause
-exit /b 0
+exit /b %NN_RC%
+
+#__NNPS_BEGIN__
+$ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'
+$Out = $env:NN_OUT
+if (-not $Out) { $Out = Join-Path $env:TEMP ('IPv4_Deep_Audit_' + $env:COMPUTERNAME) }
+New-Item -ItemType Directory -Path $Out -Force | Out-Null
+
+$TranscriptStarted = $false
+try {
+    Start-Transcript -Path (Join-Path $Out 'console.log') -Force | Out-Null
+    $TranscriptStarted = $true
+} catch {}
+
+function Say([string]$Text, [ConsoleColor]$Color = 'Gray') {
+    Write-Host $Text -ForegroundColor $Color
+}
+function Stage([string]$Text) {
+    Write-Host ''
+    Write-Host ('=' * 78) -ForegroundColor DarkGray
+    Write-Host ('  ' + $Text) -ForegroundColor Cyan
+    Write-Host ('=' * 78) -ForegroundColor DarkGray
+}
+function Save-Csv($Data, [string]$Name) {
+    @($Data) | Export-Csv -LiteralPath (Join-Path $Out $Name) -NoTypeInformation -Encoding UTF8
+}
+function Save-Text($Data, [string]$Name) {
+    $Data | Out-File -LiteralPath (Join-Path $Out $Name) -Encoding UTF8 -Width 1000
+}
+function Clean([object]$Value) {
+    if ($null -eq $Value) { return '' }
+    return (($Value.ToString() -replace '[\r\n\t]+',' ') -replace '\s{2,}',' ').Trim()
+}
+function Is-PrivateIPv4([string]$Ip) {
+    if ($Ip -match '^10\.') { return $true }
+    if ($Ip -match '^192\.168\.') { return $true }
+    if ($Ip -match '^172\.(1[6-9]|2[0-9]|3[01])\.') { return $true }
+    return $false
+}
+function Ip-ToUInt32([string]$Ip) {
+    $b = [Net.IPAddress]::Parse($Ip).GetAddressBytes()
+    [Array]::Reverse($b)
+    return [BitConverter]::ToUInt32($b,0)
+}
+function UInt32-ToIp([uint32]$Value) {
+    $b = [BitConverter]::GetBytes($Value)
+    [Array]::Reverse($b)
+    return ([Net.IPAddress]::new($b)).ToString()
+}
+function Mask-ToPrefix([string]$Mask) {
+    try {
+        $bits = 0
+        foreach ($o in $Mask.Split('.')) {
+            $v = [int]$o
+            for ($i=7; $i -ge 0; $i--) {
+                if ($v -band (1 -shl $i)) { $bits++ }
+            }
+        }
+        return $bits
+    } catch { return 24 }
+}
+function Get-Range([string]$Ip, [int]$Prefix) {
+    if ($Prefix -lt 24) {
+        $p = $Ip.Split('.')
+        return [pscustomobject]@{
+            First = Ip-ToUInt32 ($p[0]+'.'+$p[1]+'.'+$p[2]+'.1')
+            Last  = Ip-ToUInt32 ($p[0]+'.'+$p[1]+'.'+$p[2]+'.254')
+            Label = ($p[0]+'.'+$p[1]+'.'+$p[2]+'.0/24 (limited from /'+$Prefix+')')
+        }
+    }
+    $u = [uint64](Ip-ToUInt32 $Ip)
+    if ($Prefix -ge 31) {
+        return [pscustomobject]@{ First=[uint32]$u; Last=[uint32]$u; Label=($Ip+'/'+$Prefix) }
+    }
+    $all = [uint64]4294967295
+    $mask64 = ($all -shl (32-$Prefix)) -band $all
+    $net64 = $u -band $mask64
+    $size = [uint64][Math]::Pow(2,(32-$Prefix))
+    $broadcast64 = $net64 + $size - 1
+    return [pscustomobject]@{
+        First = [uint32]($net64 + 1)
+        Last  = [uint32]($broadcast64 - 1)
+        Label = ((UInt32-ToIp ([uint32]$net64)) + '/' + $Prefix)
+    }
+}
+function Resolve-NameTimed([string]$Ip, [int]$TimeoutMs = 650) {
+    try {
+        $ar = [Net.Dns]::BeginGetHostEntry($Ip,$null,$null)
+        if ($ar.AsyncWaitHandle.WaitOne($TimeoutMs,$false)) {
+            return ([Net.Dns]::EndGetHostEntry($ar)).HostName
+        }
+    } catch {}
+    return ''
+}
+function Test-Tcp([string]$Ip,[int]$Port,[int]$TimeoutMs=220) {
+    $c = New-Object Net.Sockets.TcpClient
+    try {
+        $a = $c.BeginConnect($Ip,$Port,$null,$null)
+        if ($a.AsyncWaitHandle.WaitOne($TimeoutMs,$false) -and $c.Connected) {
+            try { $c.EndConnect($a) } catch {}
+            return $true
+        }
+    } catch {}
+    finally { try { $c.Close() } catch {} }
+    return $false
+}
+function Get-ArpMap {
+    $map = @{}
+    try {
+        foreach ($line in (arp -a)) {
+            if ($line -match '^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-fA-F-]{17})\s+') {
+                $map[$matches[1]] = $matches[2].ToUpper()
+            }
+        }
+    } catch {}
+    return $map
+}
+function Get-VendorHint([string]$Mac) {
+    if (-not $Mac) { return '' }
+    $m = $Mac.ToUpper().Replace(':','-')
+    $oui = ($m.Split('-')[0..2] -join '-')
+    $known = @{
+        'AC-1F-6B'='Supermicro'
+        '3C-EC-EF'='Supermicro'
+        '08-00-27'='Oracle VirtualBox'
+        'F0-9F-C2'='Ubiquiti'
+        'E0-63-DA'='Ubiquiti'
+        '00-12-34'='Camille Bauer'
+        '50-FF-20'='Keenetic'
+        '00-1E-67'='Intel'
+    }
+    if ($known.ContainsKey($oui)) { return $known[$oui] }
+    return $oui
+}
+function Service-Name([int]$Port) {
+    $m = @{
+        21='FTP';22='SSH';23='TELNET';25='SMTP';53='DNS';80='HTTP';81='HTTP-ALT';88='KERBEROS';
+        110='POP3';111='RPCBIND';135='MS-RPC';139='NETBIOS';143='IMAP';179='BGP';389='LDAP';
+        443='HTTPS';445='SMB';465='SMTPS';502='MODBUS-TCP';515='LPD';548='AFP';554='RTSP';
+        587='SMTP-SUB';623='IPMI/RMCP?';631='IPP';636='LDAPS';873='RSYNC';902='VMWARE';
+        993='IMAPS';995='POP3S';1080='SOCKS';1194='OPENVPN';1433='MSSQL';1521='ORACLE';
+        1723='PPTP';1883='MQTT';1947='SENTINEL-LDK';2049='NFS';2375='DOCKER';2376='DOCKER-TLS';
+        2404='IEC-104';3000='HTTP-DEV';3128='PROXY';3268='LDAP-GC';3306='MYSQL';3389='RDP';
+        3478='STUN/UNIFI';3690='SVN';4000='APP';4369='ERLANG-EPMD';4840='OPC-UA';5000='HTTP-APP';
+        5001='HTTPS-APP';5060='SIP';5432='POSTGRES';5555='ADB';5672='AMQP';5900='VNC';
+        5985='WINRM';5986='WINRM-TLS';6379='REDIS';6443='K8S-API';7001='WEBLOGIC';
+        8000='HTTP-ALT';8008='HTTP-ALT';8080='HTTP-PROXY';8081='HTTP-ALT';8088='HTTP-ALT';
+        8090='HTTP-ALT';8443='HTTPS-ALT';8502='UNKNOWN-8502';8888='HTTP-ALT';9000='APP';
+        9090='APP';9100='JETDIRECT';9200='ELASTIC';9418='GIT';10000='WEBMIN';11211='MEMCACHED';
+        15672='RABBITMQ';25565='MINECRAFT';27017='MONGODB';28017='MONGODB-WEB';44818='ETHERNET-IP'
+    }
+    if ($m.ContainsKey($Port)) { return $m[$Port] }
+    return 'UNKNOWN'
+}
+function Get-HttpFingerprint([string]$Ip,[int]$Port,[bool]$Tls) {
+    $scheme = if ($Tls) { 'https' } else { 'http' }
+    $url = $scheme + '://' + $Ip + ':' + $Port + '/'
+    $oldCb = [Net.ServicePointManager]::ServerCertificateValidationCallback
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    try {
+        $req = [Net.HttpWebRequest]::Create($url)
+        $req.Method = 'GET'
+        $req.Timeout = 1500
+        $req.ReadWriteTimeout = 1500
+        $req.AllowAutoRedirect = $false
+        $req.UserAgent = 'NetNull-Network-Audit/1.0'
+        $resp = $req.GetResponse()
+        $status = [int]$resp.StatusCode
+        $server = Clean $resp.Headers['Server']
+        $location = Clean $resp.Headers['Location']
+        $title = ''
+        try {
+            $reader = New-Object IO.StreamReader($resp.GetResponseStream())
+            $buf = New-Object char[] 32768
+            $n = $reader.ReadBlock($buf,0,$buf.Length)
+            if ($n -gt 0) {
+                $body = -join $buf[0..($n-1)]
+                if ($body -match '(?is)<title[^>]*>\s*(.*?)\s*</title>') {
+                    $title = Clean ([Net.WebUtility]::HtmlDecode($matches[1]))
+                }
+            }
+            $reader.Close()
+        } catch {}
+        $resp.Close()
+        return Clean ('HTTP '+$status+' | Server='+$server+' | Title='+$title+' | Location='+$location)
+    } catch [Net.WebException] {
+        try {
+            if ($_.Exception.Response) {
+                $r = $_.Exception.Response
+                $status = [int]$r.StatusCode
+                $server = Clean $r.Headers['Server']
+                $r.Close()
+                return Clean ('HTTP '+$status+' | Server='+$server)
+            }
+        } catch {}
+        return ''
+    } catch { return '' }
+    finally {
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = $oldCb
+    }
+}
+function Get-TlsFingerprint([string]$Ip,[int]$Port) {
+    $tcp = New-Object Net.Sockets.TcpClient
+    try {
+        $a = $tcp.BeginConnect($Ip,$Port,$null,$null)
+        if (-not $a.AsyncWaitHandle.WaitOne(900,$false)) { return '' }
+        try { $tcp.EndConnect($a) } catch {}
+        $ssl = New-Object Net.Security.SslStream($tcp.GetStream(),$false,({$true}))
+        $auth = $ssl.BeginAuthenticateAsClient($Ip,$null,$null)
+        if (-not $auth.AsyncWaitHandle.WaitOne(1300,$false)) { return '' }
+        try { $ssl.EndAuthenticateAsClient($auth) } catch { return '' }
+        if ($ssl.RemoteCertificate) {
+            $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
+            return Clean ('TLS Subject='+$cert.Subject+' | Issuer='+$cert.Issuer+' | Expires='+$cert.NotAfter.ToString('yyyy-MM-dd'))
+        }
+    } catch {}
+    finally { try { $tcp.Close() } catch {} }
+    return ''
+}
+function Get-Banner([string]$Ip,[int]$Port) {
+    $c = New-Object Net.Sockets.TcpClient
+    try {
+        $a = $c.BeginConnect($Ip,$Port,$null,$null)
+        if (-not $a.AsyncWaitHandle.WaitOne(800,$false)) { return '' }
+        try { $c.EndConnect($a) } catch {}
+        $s = $c.GetStream()
+        $s.ReadTimeout = 850
+        $buf = New-Object byte[] 768
+        $n = $s.Read($buf,0,$buf.Length)
+        if ($n -gt 0) {
+            return Clean ([Text.Encoding]::ASCII.GetString($buf,0,$n))
+        }
+    } catch {}
+    finally { try { $c.Close() } catch {} }
+    return ''
+}
+function Invoke-CheckHostTcp([string]$Ip,[int]$Port) {
+    $rows = @()
+    try {
+        $u = 'https://check-host.net/check-tcp?host=' + [Uri]::EscapeDataString($Ip+':'+$Port) + '&max_nodes=3'
+        $req = Invoke-RestMethod -Uri $u -Headers @{Accept='application/json'} -TimeoutSec 7
+        if (-not $req.request_id) { return @() }
+        $rid = $req.request_id
+        $nodes = @($req.nodes.PSObject.Properties.Name)
+        $result = $null
+        for ($try=0; $try -lt 5; $try++) {
+            Start-Sleep -Milliseconds 900
+            try {
+                $result = Invoke-RestMethod -Uri ('https://check-host.net/check-result/'+$rid) -Headers @{Accept='application/json'} -TimeoutSec 7
+            } catch {}
+            if ($result) {
+                $done = 0
+                foreach ($np in $result.PSObject.Properties) { if ($null -ne $np.Value) { $done++ } }
+                if ($done -ge [Math]::Max(1,$nodes.Count)) { break }
+            }
+        }
+        if ($result) {
+            foreach ($p in $result.PSObject.Properties) {
+                $node = $p.Name
+                $val = $p.Value
+                $status = 'PENDING'
+                $detail = ''
+                if ($null -ne $val) {
+                    $item = @($val)[0]
+                    if ($item -and $item.PSObject.Properties['time']) {
+                        $status = 'OPEN'
+                        $detail = 'time=' + $item.time + 's address=' + $item.address
+                    } elseif ($item -and $item.PSObject.Properties['error']) {
+                        $status = 'CLOSED/ERROR'
+                        $detail = Clean $item.error
+                    } else {
+                        $status = 'CLOSED/ERROR'
+                        $detail = Clean ($val | ConvertTo-Json -Compress -Depth 4)
+                    }
+                }
+                $rows += [pscustomobject]@{ PublicIP=$Ip; Port=$Port; Node=$node; Status=$status; Detail=$detail; RequestId=$rid }
+            }
+        }
+    } catch {
+        $rows += [pscustomobject]@{ PublicIP=$Ip; Port=$Port; Node='API'; Status='ERROR'; Detail=Clean $_.Exception.Message; RequestId='' }
+    }
+    return $rows
+}
+function Get-Ssdp {
+    $found = @()
+    $udp = $null
+    try {
+        $udp = New-Object Net.Sockets.UdpClient
+        $udp.Client.ReceiveTimeout = 450
+        $msg = "M-SEARCH * HTTP/1.1`r`nHOST: 239.255.255.250:1900`r`nMAN: `"ssdp:discover`"`r`nMX: 1`r`nST: ssdp:all`r`n`r`n"
+        $bytes = [Text.Encoding]::ASCII.GetBytes($msg)
+        $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Parse('239.255.255.250'),1900)
+        [void]$udp.Send($bytes,$bytes.Length,$ep)
+        $deadline = [DateTime]::UtcNow.AddSeconds(3)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            try {
+                $remote = New-Object Net.IPEndPoint([Net.IPAddress]::Any,0)
+                $r = $udp.Receive([ref]$remote)
+                $txt = [Text.Encoding]::ASCII.GetString($r)
+                $location='';$server='';$st='';$usn=''
+                foreach($line in ($txt -split "`r?`n")) {
+                    if($line -match '^(?i)LOCATION:\s*(.+)$'){$location=$matches[1].Trim()}
+                    elseif($line -match '^(?i)SERVER:\s*(.+)$'){$server=$matches[1].Trim()}
+                    elseif($line -match '^(?i)ST:\s*(.+)$'){$st=$matches[1].Trim()}
+                    elseif($line -match '^(?i)USN:\s*(.+)$'){$usn=$matches[1].Trim()}
+                }
+                $found += [pscustomobject]@{IP=$remote.Address.ToString();Location=$location;Server=$server;ST=$st;USN=$usn}
+            } catch {}
+        }
+    } catch {}
+    finally { if($udp){try{$udp.Close()}catch{}} }
+    return @($found | Sort-Object IP,Location -Unique)
+}
+
+$Findings = New-Object System.Collections.ArrayList
+function Add-Finding([string]$Severity,[string]$Host,[string]$Finding,[string]$Evidence) {
+    [void]$Findings.Add([pscustomobject]@{Severity=$Severity;Host=$Host;Finding=$Finding;Evidence=$Evidence})
+}
+
+try {
+    $Start = Get-Date
+
+    Stage '1. LOCAL INTERFACES / ROUTING / DNS'
+    $Adapters = @()
+    try {
+        $cfgs = Get-CimInstance Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true}
+        foreach($a in $cfgs) {
+            foreach($ip in @($a.IPAddress)) {
+                if($ip -match '^\d{1,3}(?:\.\d{1,3}){3}$') {
+                    $Adapters += [pscustomobject]@{
+                        Adapter=$a.Description
+                        IPv4=$ip
+                        Mask=@($a.IPSubnet)[0]
+                        Prefix=(Mask-ToPrefix @($a.IPSubnet)[0])
+                        Gateway=@($a.DefaultIPGateway)[0]
+                        DNS=($a.DNSServerSearchOrder -join ', ')
+                        MAC=$a.MACAddress
+                        DHCP=$a.DHCPEnabled
+                    }
+                }
+            }
+        }
+    } catch {}
+    Save-Csv $Adapters 'interfaces.csv'
+    $Adapters | Format-Table -AutoSize | Out-String | Write-Host
+
+    $Lan = @($Adapters | Where-Object { Is-PrivateIPv4 $_.IPv4 } | Select-Object -First 1)
+    if($Lan.Count -gt 0) { $Lan=$Lan[0] } else { $Lan=$null }
+
+    Stage '2. PUBLIC IPv4 / ISP / PTR'
+    $Wan = ''
+    foreach($u in @('https://api.ipify.org','https://icanhazip.com','https://ifconfig.me/ip')) {
+        if(-not $Wan) {
+            try {
+                $x = (Invoke-RestMethod -Uri $u -TimeoutSec 6).ToString().Trim()
+                if($x -match '^\d{1,3}(?:\.\d{1,3}){3}$') { $Wan=$x }
+            } catch {}
+        }
+    }
+    $PublicInfo = $null
+    if($Wan) {
+        Say ('Public IPv4: '+$Wan) Green
+        $ptr = Resolve-NameTimed $Wan 900
+        if($ptr) { Say ('PTR: '+$ptr) DarkGray }
+        try {
+            $PublicInfo = Invoke-RestMethod -Uri ('https://ipwho.is/'+$Wan) -TimeoutSec 7
+            $PublicInfo | ConvertTo-Json -Depth 8 | Save-Text -Name 'public_ip_metadata.json'
+            if($PublicInfo.success -ne $false) {
+                Say ('ISP: '+$PublicInfo.connection.isp+' | ASN: '+$PublicInfo.connection.asn) DarkGray
+                Say ('Geo: '+$PublicInfo.country+', '+$PublicInfo.region+', '+$PublicInfo.city) DarkGray
+            }
+        } catch {}
+        ('WAN='+$Wan+"`r`nPTR="+$ptr) | Save-Text -Name 'public_ipv4.txt'
+    } else {
+        Say 'Public IPv4 unavailable.' Yellow
+        Add-Finding 'INFO' 'WAN' 'Public IPv4 could not be detected' 'HTTPS lookup failed or Internet unavailable'
+    }
+
+    Stage '3. LAN DISCOVERY - PING + ARP (NO DNS BLOCKING)'
+    $Hosts = @()
+    if($Lan) {
+        $prefix=[int]$Lan.Prefix
+        $range=Get-Range $Lan.IPv4 $prefix
+        Say ('Scanning: '+$range.Label) Cyan
+        $targets = @()
+        for($n=[uint32]$range.First; $n -le [uint32]$range.Last; $n++) {
+            $targets += UInt32-ToIp $n
+            if($n -eq [uint32]::MaxValue){break}
+        }
+        Say ('IPv4 targets: '+$targets.Count) DarkGray
+
+        $pool=[RunspaceFactory]::CreateRunspacePool(1,64);$pool.Open()
+        $jobs=@()
+        foreach($ip in $targets) {
+            $ps=[PowerShell]::Create();$ps.RunspacePool=$pool
+            [void]$ps.AddScript({
+                param($ip)
+                try {
+                    $p=New-Object Net.NetworkInformation.Ping
+                    $r=$p.Send($ip,260)
+                    if($r.Status -eq 'Success'){[pscustomobject]@{IP=$ip;PingMs=[int]$r.RoundtripTime}}
+                } catch {}
+            }).AddArgument($ip)
+            $jobs += [pscustomobject]@{P=$ps;H=$ps.BeginInvoke()}
+        }
+        $PingRows=@()
+        foreach($j in $jobs) {
+            try{$r=$j.P.EndInvoke($j.H);if($r){$PingRows+=$r}}catch{}
+            try{$j.P.Dispose()}catch{}
+        }
+        $pool.Close();$pool.Dispose()
+        Save-Csv $PingRows 'ping_alive.csv'
+
+        Start-Sleep -Milliseconds 300
+        arp -a | Save-Text -Name 'raw_arp_after.txt'
+        $arp=Get-ArpMap
+        $ips = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach($p in $PingRows){[void]$ips.Add($p.IP)}
+        foreach($ip in $arp.Keys) {
+            try {
+                $u=Ip-ToUInt32 $ip
+                if($u -ge $range.First -and $u -le $range.Last){[void]$ips.Add($ip)}
+            } catch {}
+        }
+        [void]$ips.Add($Lan.IPv4)
+        if($Lan.Gateway){[void]$ips.Add($Lan.Gateway)}
+
+        Say ('Unique LAN candidates: '+$ips.Count) Green
+
+        $pool=[RunspaceFactory]::CreateRunspacePool(1,32);$pool.Open()
+        $jobs=@()
+        foreach($ip in $ips) {
+            $ps=[PowerShell]::Create();$ps.RunspacePool=$pool
+            [void]$ps.AddScript({
+                param($ip)
+                $name=''
+                try {
+                    $ar=[Net.Dns]::BeginGetHostEntry($ip,$null,$null)
+                    if($ar.AsyncWaitHandle.WaitOne(650,$false)){$name=([Net.Dns]::EndGetHostEntry($ar)).HostName}
+                } catch {}
+                [pscustomobject]@{IP=$ip;Hostname=$name}
+            }).AddArgument($ip)
+            $jobs += [pscustomobject]@{P=$ps;H=$ps.BeginInvoke();IP=$ip}
+        }
+        $Names=@{}
+        foreach($j in $jobs) {
+            try{$r=$j.P.EndInvoke($j.H);if($r){$Names[$j.IP]=$r.Hostname}}catch{}
+            try{$j.P.Dispose()}catch{}
+        }
+        $pool.Close();$pool.Dispose()
+
+        foreach($ip in $ips) {
+            $pr=$PingRows | Where-Object IP -eq $ip | Select-Object -First 1
+            $mac=$arp[$ip]
+            $role='DEVICE'
+            if($ip -eq $Lan.IPv4){$role='THIS-PC'}
+            elseif($ip -eq $Lan.Gateway){$role='GATEWAY'}
+            $vendor=Get-VendorHint $mac
+            $Hosts += [pscustomobject]@{
+                IP=$ip
+                Hostname=$Names[$ip]
+                MAC=$mac
+                VendorHint=$vendor
+                PingMs=if($pr){$pr.PingMs}else{$null}
+                Role=$role
+            }
+        }
+        $Hosts=@($Hosts | Sort-Object {[version]$_.IP})
+        Save-Csv $Hosts 'hosts_inventory.csv'
+        $Hosts | Format-Table IP,Hostname,MAC,VendorHint,PingMs,Role -AutoSize | Out-String | Write-Host
+    } else {
+        Say 'No private RFC1918 LAN adapter found. Automatic LAN sweep skipped.' Yellow
+    }
+
+    Stage '4. COMMON TCP PORT SCAN ON ALL LAN CANDIDATES'
+    $Ports = @(
+        21,22,23,25,53,80,81,88,110,111,135,139,143,179,389,443,445,465,502,515,548,554,
+        587,623,631,636,873,902,993,995,1080,1194,1433,1521,1723,1883,1947,2049,2375,
+        2376,2404,3000,3128,3268,3306,3389,3478,3690,4000,4369,4840,5000,5001,5060,
+        5432,5555,5672,5900,5985,5986,6379,6443,7001,8000,8008,8080,8081,8088,8090,
+        8443,8502,8888,9000,9090,9100,9200,9418,10000,11211,15672,25565,27017,28017,44818
+    )
+    $OpenPorts=@()
+    if($Hosts.Count -gt 0) {
+        $pool=[RunspaceFactory]::CreateRunspacePool(1,[Math]::Min(64,[Math]::Max(8,$Hosts.Count)));$pool.Open()
+        $jobs=@()
+        foreach($h in $Hosts) {
+            $ps=[PowerShell]::Create();$ps.RunspacePool=$pool
+            [void]$ps.AddScript({
+                param($ip,$ports)
+                $out=@()
+                foreach($port in $ports) {
+                    $c=New-Object Net.Sockets.TcpClient
+                    try {
+                        $a=$c.BeginConnect($ip,[int]$port,$null,$null)
+                        if($a.AsyncWaitHandle.WaitOne(220,$false)-and$c.Connected) {
+                            try{$c.EndConnect($a)}catch{}
+                            $out += [pscustomobject]@{IP=$ip;Port=[int]$port}
+                        }
+                    } catch {}
+                    finally { try{$c.Close()}catch{} }
+                }
+                return $out
+            }).AddArgument($h.IP).AddArgument($Ports)
+            $jobs += [pscustomobject]@{P=$ps;H=$ps.BeginInvoke();IP=$h.IP}
+        }
+        $done=0
+        foreach($j in $jobs) {
+            try{$r=$j.P.EndInvoke($j.H);if($r){$OpenPorts+=@($r)}}catch{}
+            try{$j.P.Dispose()}catch{}
+            $done++
+            Say ('  scanned hosts '+$done+'/'+$jobs.Count) DarkGray
+        }
+        $pool.Close();$pool.Dispose()
+    }
+    foreach($o in $OpenPorts) {
+        Add-Member -InputObject $o -NotePropertyName Service -NotePropertyValue (Service-Name ([int]$o.Port))
+    }
+    $OpenPorts=@($OpenPorts | Sort-Object {[version]$_.IP},Port)
+    Save-Csv $OpenPorts 'open_tcp_ports.csv'
+    Say ('Open TCP endpoints: '+$OpenPorts.Count) Green
+    $OpenPorts | Format-Table IP,Port,Service -AutoSize | Out-String | Write-Host
+
+    Stage '5. SERVICE FINGERPRINTING - WEB / SSH / TLS / BANNERS'
+    $Fingerprints=@()
+    $httpPorts=@(80,81,1947,3000,5000,5555,5985,8000,8008,8080,8081,8088,8090,8502,8888,9000,9090,9100,9200,10000,28017)
+    $httpsPorts=@(443,465,636,993,995,2376,5001,5986,6443,8443)
+    $bannerPorts=@(21,22,23,25,110,143,587)
+    foreach($o in $OpenPorts) {
+        $fp=''
+        if($httpPorts -contains [int]$o.Port) {
+            $fp=Get-HttpFingerprint $o.IP ([int]$o.Port) $false
+        } elseif($httpsPorts -contains [int]$o.Port) {
+            $hfp=Get-HttpFingerprint $o.IP ([int]$o.Port) $true
+            $tfp=Get-TlsFingerprint $o.IP ([int]$o.Port)
+            $fp=Clean ($hfp+' | '+$tfp)
+        } elseif($bannerPorts -contains [int]$o.Port) {
+            $fp=Get-Banner $o.IP ([int]$o.Port)
+        }
+        if($fp) {
+            $Fingerprints += [pscustomobject]@{IP=$o.IP;Port=$o.Port;Service=$o.Service;Fingerprint=$fp}
+            Say ('  '+$o.IP+':'+$o.Port+'  '+$fp) DarkGray
+        }
+    }
+    Save-Csv $Fingerprints 'service_fingerprints.csv'
+
+    Stage '6. DEVICE / SERVER / PORTAL CLASSIFICATION'
+    foreach($h in $Hosts) {
+        $hp=@($OpenPorts | Where-Object IP -eq $h.IP)
+        $plist=@($hp.Port)
+        if($h.VendorHint -match 'Supermicro') {
+            Add-Finding 'HIGH' $h.IP 'Supermicro server/BMC candidate' ('MAC '+$h.MAC+'; open ports: '+($plist -join ','))
+        }
+        if($h.VendorHint -match 'VirtualBox') {
+            Add-Finding 'INFO' $h.IP 'VirtualBox virtual machine candidate' ('MAC '+$h.MAC)
+        }
+        if($h.VendorHint -match 'Ubiquiti') {
+            Add-Finding 'MEDIUM' $h.IP 'Ubiquiti/UniFi network device candidate' ('MAC '+$h.MAC+'; open ports: '+($plist -join ','))
+        }
+        if($h.VendorHint -match 'Keenetic') {
+            Add-Finding 'MEDIUM' $h.IP 'Keenetic router/network device candidate' ('MAC '+$h.MAC)
+        }
+        if($h.VendorHint -match 'Camille Bauer') {
+            Add-Finding 'HIGH' $h.IP 'Industrial/power-monitoring device candidate' ('Camille Bauer MAC; open ports: '+($plist -join ','))
+        }
+        if($plist -contains 22) {
+            $b=($Fingerprints | Where-Object {$_.IP -eq $h.IP -and $_.Port -eq 22} | Select-Object -First 1).Fingerprint
+            Add-Finding 'MEDIUM' $h.IP 'SSH server reachable on LAN' ('TCP/22 OPEN '+$b)
+        }
+        if($plist -contains 3389) { Add-Finding 'MEDIUM' $h.IP 'RDP service reachable on LAN' 'TCP/3389 OPEN' }
+        if($plist -contains 445) { Add-Finding 'INFO' $h.IP 'SMB service reachable on LAN' 'TCP/445 OPEN' }
+        if(($plist | Where-Object {$_ -in @(80,81,443,1947,3000,5000,5001,8000,8080,8081,8443,8502,8888,9000,9090,10000)}).Count -gt 0) {
+            $web=$hp | Where-Object {$_.Port -in @(80,81,443,1947,3000,5000,5001,8000,8080,8081,8443,8502,8888,9000,9090,10000)}
+            Add-Finding 'MEDIUM' $h.IP 'Web portal / management UI candidate' ('Ports: '+(($web.Port | Sort-Object) -join ', '))
+        }
+        if(($plist | Where-Object {$_ -in @(502,2404,4840,44818)}).Count -gt 0) {
+            Add-Finding 'HIGH' $h.IP 'Industrial/OT protocol detected' ('Ports: '+(($plist | Where-Object {$_ -in @(502,2404,4840,44818)}) -join ', '))
+        }
+        if(($plist | Where-Object {$_ -in @(1433,3306,5432,6379,9200,11211,27017)}).Count -gt 0) {
+            Add-Finding 'HIGH' $h.IP 'Database/data service reachable on LAN' ('Ports: '+(($plist | Where-Object {$_ -in @(1433,3306,5432,6379,9200,11211,27017)}) -join ', '))
+        }
+        if(($plist -contains 9100)-or($plist -contains 631)) {
+            Add-Finding 'INFO' $h.IP 'Printer/print service candidate' ('Ports: '+(($plist | Where-Object {$_ -in @(631,9100)}) -join ', '))
+        }
+    }
+
+    Stage '7. SSDP / UPnP DISCOVERY'
+    $Ssdp=Get-Ssdp
+    Save-Csv $Ssdp 'ssdp_upnp.csv'
+    if($Ssdp.Count) {
+        $Ssdp | Format-Table -AutoSize | Out-String | Write-Host
+        foreach($s in $Ssdp) {
+            Add-Finding 'INFO' $s.IP 'SSDP/UPnP device discovered' (Clean ($s.Server+' '+$s.Location))
+        }
+    } else {
+        Say 'No SSDP replies received.' DarkGray
+    }
+
+    Stage '8. LOCAL LISTENERS / PROCESS / WINDOWS SERVICES'
+    $ServiceByPid=@{}
+    try {
+        foreach($s in (Get-CimInstance Win32_Service | Where-Object {$_.State -eq 'Running'})) {
+            if($s.ProcessId -gt 0) {
+                if(-not $ServiceByPid.ContainsKey([int]$s.ProcessId)){$ServiceByPid[[int]$s.ProcessId]=@()}
+                $ServiceByPid[[int]$s.ProcessId] += $s.Name
+            }
+        }
+    } catch {}
+    $Listeners=@()
+    try {
+        foreach($c in (Get-NetTCPConnection -State Listen)) {
+            $pn=''
+            try{$pn=(Get-Process -Id $c.OwningProcess -ErrorAction Stop).ProcessName}catch{$pn='protected/system'}
+            $sv=''
+            if($ServiceByPid.ContainsKey([int]$c.OwningProcess)){$sv=($ServiceByPid[[int]$c.OwningProcess] -join ',')}
+            $Listeners += [pscustomobject]@{
+                LocalAddress=$c.LocalAddress;LocalPort=$c.LocalPort;PID=$c.OwningProcess;Process=$pn;WindowsServices=$sv
+            }
+        }
+    } catch {}
+    $Listeners=@($Listeners|Sort-Object LocalPort,LocalAddress)
+    Save-Csv $Listeners 'local_tcp_listeners.csv'
+    $Listeners | Format-Table -AutoSize | Out-String | Write-Host
+
+    $Connections=@()
+    try {
+        foreach($c in (Get-NetTCPConnection | Where-Object {$_.State -eq 'Established'})) {
+            $pn=''
+            try{$pn=(Get-Process -Id $c.OwningProcess -ErrorAction Stop).ProcessName}catch{$pn='protected/system'}
+            $Connections += [pscustomobject]@{
+                LocalAddress=$c.LocalAddress;LocalPort=$c.LocalPort;RemoteAddress=$c.RemoteAddress;RemotePort=$c.RemotePort;PID=$c.OwningProcess;Process=$pn
+            }
+        }
+    } catch {}
+    Save-Csv $Connections 'active_tcp_connections.csv'
+
+    foreach($l in $Listeners) {
+        if($l.LocalAddress -in @('0.0.0.0','::') -and $l.LocalPort -in @(22,80,443,445,1947,3389,5900,5985,5986,8080,8443,8502)) {
+            Add-Finding 'MEDIUM' 'THIS-PC' 'Interesting local service bound to all interfaces' ('Port '+$l.LocalPort+' PID '+$l.PID+' Process '+$l.Process+' Service '+$l.WindowsServices)
+        }
+    }
+
+    Stage '9. EXTERNAL EXPOSURE OF YOUR OWN PUBLIC IPv4'
+    $External=@()
+    if($Wan) {
+        $ExternalPorts=@(21,22,53,80,443,445,1947,3389,5000,5900,8080,8443,8502,10000,25565)
+        Say ('Remote nodes will test YOUR WAN '+$Wan+' only.') Yellow
+        foreach($p in $ExternalPorts) {
+            Say ('  external TCP '+$Wan+':'+$p+' ...') DarkGray
+            $r=Invoke-CheckHostTcp $Wan $p
+            $External += @($r)
+            $opens=@($r | Where-Object Status -eq 'OPEN')
+            if($opens.Count -gt 0) {
+                $sev = if($p -in @(22,445,3389,5900,3306,5432,6379,27017)){'HIGH'}else{'MEDIUM'}
+                Add-Finding $sev 'WAN' ('Public TCP/'+$p+' reachable from Internet') (($opens.Node -join ', ')+' reached '+$Wan+':'+$p)
+            }
+        }
+        Save-Csv $External 'external_wan_port_check.csv'
+        $External | Format-Table Port,Node,Status,Detail -AutoSize | Out-String | Write-Host
+    } else {
+        Say 'Skipped: public IPv4 unavailable.' Yellow
+    }
+
+    Stage '10. FIREWALL / SERVICES / ROUTING BEST-EFFORT EXPORTS'
+    try { Get-NetFirewallProfile | Export-Csv -LiteralPath (Join-Path $Out 'firewall_profiles.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+    try { Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow | Select-Object DisplayName,Profile,Direction,Action,Enabled | Export-Csv -LiteralPath (Join-Path $Out 'firewall_inbound_allow_rules.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+    try { Get-NetRoute -AddressFamily IPv4 | Select-Object DestinationPrefix,NextHop,RouteMetric,InterfaceAlias,Protocol | Export-Csv -LiteralPath (Join-Path $Out 'routes_ipv4.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+    try { Get-NetNeighbor -AddressFamily IPv4 | Select-Object IPAddress,LinkLayerAddress,State,InterfaceAlias | Export-Csv -LiteralPath (Join-Path $Out 'neighbors_ipv4.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+    try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,ProcessId,PathName | Export-Csv -LiteralPath (Join-Path $Out 'windows_services.csv') -NoTypeInformation -Encoding UTF8 } catch {}
+    try { cmd /c 'tracert -d -h 10 -w 400 1.1.1.1' | Save-Text -Name 'traceroute_1.1.1.1.txt' } catch {}
+
+    Stage '11. TOP FINDINGS'
+    $rank=@{'HIGH'=0;'MEDIUM'=1;'INFO'=2}
+    $Findings=@($Findings | Sort-Object @{Expression={if($rank.ContainsKey($_.Severity)){$rank[$_.Severity]}else{9}}},Host,Finding)
+    Save-Csv $Findings 'findings.csv'
+    $FindingText=@()
+    foreach($f in $Findings) {
+        $line='['+$f.Severity+'] '+$f.Host+' - '+$f.Finding+' :: '+$f.Evidence
+        $FindingText += $line
+        if($f.Severity -eq 'HIGH'){Say $line Red}
+        elseif($f.Severity -eq 'MEDIUM'){Say $line Yellow}
+        else{Say $line DarkGray}
+    }
+    Save-Text $FindingText 'TOP_FINDINGS.txt'
+
+    Stage '12. OPTIONAL DEEP TCP 1-65535 SCAN'
+    Say 'Optional. Enter ONE private LAN IPv4 or your detected WAN IPv4.' Cyan
+    Say 'Press ENTER to skip. The scan only does TCP connect checks; no login/exploit attempts.' DarkGray
+    $Deep = Read-Host 'Target IPv4'
+    if($Deep -match '^\d{1,3}(?:\.\d{1,3}){3}$') {
+        $allowed = (Is-PrivateIPv4 $Deep) -or ($Wan -and $Deep -eq $Wan)
+        if(-not $allowed) {
+            Say 'Refused: target is neither RFC1918 private space nor your detected WAN IPv4.' Yellow
+        } else {
+            Say ('Deep scanning '+$Deep+' TCP 1-65535...') Yellow
+            $deepOpen=New-Object System.Collections.ArrayList
+            $pool=[RunspaceFactory]::CreateRunspacePool(1,160);$pool.Open()
+            $batch=1000
+            for($start=1;$start -le 65535;$start+=$batch) {
+                $end=[Math]::Min(65535,$start+$batch-1)
+                $jobs=@()
+                for($p=$start;$p -le $end;$p++) {
+                    $ps=[PowerShell]::Create();$ps.RunspacePool=$pool
+                    [void]$ps.AddScript({
+                        param($ip,$port)
+                        $c=New-Object Net.Sockets.TcpClient
+                        try {
+                            $a=$c.BeginConnect($ip,$port,$null,$null)
+                            if($a.AsyncWaitHandle.WaitOne(130,$false)-and$c.Connected){return $port}
+                        } catch {}
+                        finally{try{$c.Close()}catch{}}
+                    }).AddArgument($Deep).AddArgument($p)
+                    $jobs += [pscustomobject]@{P=$ps;H=$ps.BeginInvoke();Port=$p}
+                }
+                foreach($j in $jobs) {
+                    try{$r=$j.P.EndInvoke($j.H);if($r){[void]$deepOpen.Add([int]$r)}}catch{}
+                    try{$j.P.Dispose()}catch{}
+                }
+                $pct=[math]::Round(($end/65535.0)*100,1)
+                Say ('  '+$pct+'% | '+$start+'-'+$end+' | open='+$deepOpen.Count) DarkGray
+            }
+            $pool.Close();$pool.Dispose()
+            $DeepRows=@()
+            foreach($p in @($deepOpen|Sort-Object -Unique)) {
+                $DeepRows += [pscustomobject]@{IP=$Deep;Port=$p;Service=(Service-Name ([int]$p))}
+            }
+            Save-Csv $DeepRows ('deep_scan_'+($Deep -replace '\.','_')+'.csv')
+            Say ('Deep scan finished. Open TCP ports: '+$DeepRows.Count) Green
+            $DeepRows|Format-Table -AutoSize|Out-String|Write-Host
+        }
+    }
+
+    Stage '13. HTML REPORT'
+    function HtmlTable($Rows) {
+        if(-not $Rows -or @($Rows).Count -eq 0){return '<div class="muted">No data</div>'}
+        return (@($Rows)|ConvertTo-Html -Fragment)
+    }
+    $css=@'
+body{margin:0;padding:28px;background:#0b0f14;color:#d8dee9;font:14px Segoe UI,Arial,sans-serif}
+h1{color:#7ee787;margin:0 0 6px}h2{color:#79c0ff;border-bottom:1px solid #30363d;padding-bottom:8px;margin-top:30px}
+.card{background:#111820;border:1px solid #29313a;border-radius:12px;padding:16px;margin:14px 0}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid #30363d;padding:6px 8px;text-align:left}
+th{background:#161b22;color:#79c0ff}tr:nth-child(even){background:#0f141b}.muted{color:#8b949e}
+.high{color:#ff7b72;font-weight:700}.medium{color:#e3b341;font-weight:700}.info{color:#8b949e}
+code{background:#161b22;border:1px solid #30363d;border-radius:5px;padding:2px 5px}
+'@
+    $elapsed=(Get-Date)-$Start
+    $isp=''
+    if($PublicInfo -and $PublicInfo.connection){$isp=Clean ($PublicInfo.connection.isp+' / '+$PublicInfo.connection.asn)}
+    $summary="<div class='card'><b>Computer:</b> $env:COMPUTERNAME<br><b>User:</b> $env:USERNAME<br><b>LAN:</b> $($Lan.IPv4)<br><b>Gateway:</b> $($Lan.Gateway)<br><b>WAN:</b> $Wan<br><b>ISP:</b> $isp<br><b>Hosts:</b> $($Hosts.Count)<br><b>Open LAN TCP endpoints:</b> $($OpenPorts.Count)<br><b>Findings:</b> $($Findings.Count)<br><b>Runtime:</b> $([math]::Round($elapsed.TotalSeconds,1)) sec</div>"
+    $findingHtml='<table><tr><th>Severity</th><th>Host</th><th>Finding</th><th>Evidence</th></tr>'
+    foreach($f in $Findings){
+        $cl=$f.Severity.ToLower()
+        $findingHtml+="<tr><td class='$cl'>$($f.Severity)</td><td>$([Net.WebUtility]::HtmlEncode($f.Host))</td><td>$([Net.WebUtility]::HtmlEncode($f.Finding))</td><td>$([Net.WebUtility]::HtmlEncode($f.Evidence))</td></tr>"
+    }
+    $findingHtml+='</table>'
+    $body="<h1>NetNull IPv4 Deep Audit</h1><div class='muted'>Windows 10 user-mode network inventory and exposure report</div>$summary"
+    $body+="<h2>Top findings</h2><div class='card'>$findingHtml</div>"
+    $body+="<h2>LAN hosts</h2><div class='card'>$(HtmlTable $Hosts)</div>"
+    $body+="<h2>Open TCP ports</h2><div class='card'>$(HtmlTable $OpenPorts)</div>"
+    $body+="<h2>Service fingerprints</h2><div class='card'>$(HtmlTable $Fingerprints)</div>"
+    $body+="<h2>External WAN checks</h2><div class='card'>$(HtmlTable $External)</div>"
+    $body+="<h2>Local listeners</h2><div class='card'>$(HtmlTable $Listeners)</div>"
+    $body+="<h2>SSDP / UPnP</h2><div class='card'>$(HtmlTable $Ssdp)</div>"
+    $html=ConvertTo-Html -Head ("<meta charset='utf-8'><title>NetNull IPv4 Deep Audit</title><style>$css</style>") -Body $body
+    $html|Out-File -LiteralPath (Join-Path $Out 'REPORT.html') -Encoding UTF8
+
+    ('FINISHED '+(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) | Set-Content -LiteralPath (Join-Path $Out '99_FINISHED.txt') -Encoding ASCII
+    Say ('DONE: '+$Out) Green
+}
+catch {
+    $_ | Format-List * -Force | Out-File -LiteralPath (Join-Path $Out 'ERROR.txt') -Encoding UTF8 -Width 1000
+    Say ('FATAL: '+$_.Exception.Message) Red
+    exit 1
+}
+finally {
+    try { if($TranscriptStarted){Stop-Transcript | Out-Null} } catch {}
+}
