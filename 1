@@ -385,8 +385,8 @@ function Get-Ssdp {
 }
 
 $Findings = New-Object System.Collections.ArrayList
-function Add-Finding([string]$Severity,[string]$Host,[string]$Finding,[string]$Evidence) {
-    [void]$Findings.Add([pscustomobject]@{Severity=$Severity;Host=$Host;Finding=$Finding;Evidence=$Evidence})
+function Add-Finding([string]$Severity,[string]$TargetHost,[string]$Finding,[string]$Evidence) {
+    [void]$Findings.Add([pscustomobject]@{Severity=$Severity;Host=$TargetHost;Finding=$Finding;Evidence=$Evidence})
 }
 
 try {
@@ -617,6 +617,7 @@ try {
     Save-Csv $Fingerprints 'service_fingerprints.csv'
 
     Stage '6. DEVICE / SERVER / PORTAL CLASSIFICATION'
+    Say 'Classification engine fixed: no collision with PowerShell automatic $Host variable.' DarkGray
     foreach($h in $Hosts) {
         $hp=@($OpenPorts | Where-Object IP -eq $h.IP)
         $plist=@($hp.Port)
