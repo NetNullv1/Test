@@ -1257,7 +1257,7 @@ return function(C, E)
     window.BackgroundColor3=palette.panel
     window.Draggable=false
     window.Active=true
-    r[11].Text="Lumynia | Танос · RU RC2"
+    r[11].Text="NetNull | Танос · RU RC2"
     r[11].TextSize=20
     r[12].Text="−"
     r[8].Text="Танос\nRU"
@@ -2111,7 +2111,7 @@ return function(env, life)
                   pc = 231
                   -- P000:0231
                   if life.dispatch then life.dispatch(0, 231) end
-                  regs[11]["Text"] = (life.text and life.text("Lumynia | Танос") or ("Lumynia | Танос"))
+                  regs[11]["Text"] = (life.text and life.text("NetNull | Танос") or ("NetNull | Танос"))
                   pc = 232
                   -- P000:0232
                   if life.dispatch then life.dispatch(0, 232) end
